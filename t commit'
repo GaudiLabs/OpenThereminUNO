@@ -1,0 +1,1090 @@
+commit 2db98ad5e445fb31ccf720596ee563b57ff71e85
+Author: Gaudi <info@gaudi.ch>
+Date:   Thu Apr 11 01:27:17 2013 +0200
+
+    first commit
+
+diff --git a/OTPinDefs.h b/OTPinDefs.h
+new file mode 100644
+index 0000000..996a762
+--- /dev/null
++++ b/OTPinDefs.h
+@@ -0,0 +1,54 @@
++/**
++ * \file
++ * Pin definitions
++ */
++
++#ifndef WavePinDefs_h
++#define WavePinDefs_h
++
++//------------------------------------------------------------------------------
++// DAC pin definitions
++
++// LDAC may be connected to ground to save a pin
++/** Set USE_MCP_DAC_LDAC to 0 if LDAC is grounded. */
++#define USE_MCP_DAC_LDAC 1
++
++// use arduino pins 2, 3, 4, 5 for DAC
++
++// pin 2 is DAC chip select
++
++/** Data direction register for DAC chip select. */
++#define MCP_DAC_CS_DDR DDRB
++/** Port register for DAC chip select. */
++#define MCP_DAC_CS_PORT PORTB
++/** Port bit number for DAC chip select. */
++#define MCP_DAC_CS_BIT 2
++
++// pin 3 is DAC serial clock
++/** Data direction register for DAC clock. */
++#define MCP_DAC_SCK_DDR DDRB
++/** Port register for DAC clock. */
++#define MCP_DAC_SCK_PORT PORTB
++/** Port bit number for DAC clock. */
++#define MCP_DAC_SCK_BIT 5
++
++// pin 4 is DAC serial data in
++
++/** Data direction register for DAC serial in. */
++#define MCP_DAC_SDI_DDR  DDRB
++/** Port register for DAC clock. */
++#define MCP_DAC_SDI_PORT PORTB
++/** Port bit number for DAC clock. */
++#define MCP_DAC_SDI_BIT  3
++
++// pin 5 is LDAC if used
++#if USE_MCP_DAC_LDAC
++/** Data direction register for Latch DAC Input. */
++#define MCP_DAC_LDAC_DDR  DDRD
++/** Port register for Latch DAC Input. */
++#define MCP_DAC_LDAC_PORT PORTD
++/** Port bit number for Latch DAC Input. */
++#define MCP_DAC_LDAC_BIT  7
++#endif // USE_MCP_DAC_LDAC
++
++#endif // WavePinDefs_h
+diff --git a/Open_Theremin_UNO.ino b/Open_Theremin_UNO.ino
+new file mode 100644
+index 0000000..3fb2f2c
+--- /dev/null
++++ b/Open_Theremin_UNO.ino
+@@ -0,0 +1,312 @@
++
++// OPEN.THEREMIN.UNO Code
++// V1.0
++// by Urs Gaudenz, 2012 
++
++#include <avr/io.h>
++#include <inttypes.h>
++#include <avr/interrupt.h>
++#include <avr/signal.h>
++#include <avr/pgmspace.h>
++#include <avr/sleep.h>
++#include <avr/delay.h>
++
++#include "mcpDac.h"
++#include "theremin_sintable.c"
++
++#define F_CPU 16000000UL
++
++int32_t pitch_init = 0; 			// Initial value of pitch
++int32_t vol_init = 0;				// Initial value of volume
++int32_t pitch_v,pitch_l;			// Last value of pitch
++int32_t vol_v,vol_l;				// Last value of volume
++uint8_t i;
++uint8_t state = 0;
++uint16_t val[8]; 
++
++int16_t t;
++
++/* volatile  - used in the ISR Routine*/ 
++
++volatile uint16_t pitch = 0;			// Pitch value
++volatile uint16_t pitch_counter = 0; 	// Pitch counter
++volatile uint16_t pitch_counter_l = 0; 	// Last value of pitch counter
++volatile uint16_t vol = 0;  			// Volume value
++volatile uint16_t vol8;					// Volume byte
++volatile uint16_t vol_counter = 0; 		// Volume counter
++volatile uint16_t vol_counter_l = 0; 	// Last value of volume counter
++
++volatile uint8_t flag_pwm = 0;			// PWM flag
++volatile uint8_t flag_vol = 0;			// Volume read flag
++volatile uint8_t flag_pitch = 0;		// Pitch read flag
++volatile uint16_t pointer = 0;			// Table pointer
++volatile uint16_t add_val = 0;			// Table pointer increment
++volatile uint8_t mode = 4; 			// Mode value
++volatile uint16_t timer = 0; 			// Timer value
++
++SIGNAL (TIMER2_OVF_vect)                          // Timer 2 -  WAVE generator 34us
++{
++  TCNT2 = 192;
++  
++  volatile  int32_t temp_val;
++  volatile  uint32_t temp2_val;
++  temp_val = (signed int)pgm_read_word_near (sine_table + ((unsigned int)(pointer>>6) & 0x3ff));  //3.2us
++  
++   // PORTD |= (1<<PD3);
++   
++ if (temp_val>0){                   //13us
++   temp2_val=(temp_val*vol8);
++   temp2_val=temp2_val>>13; 
++  //  temp2_val=(temp_val);
++   //temp2_val=temp2_val>>3; 
++   temp2_val=temp2_val+2048;  
++ } else
++ { 
++   temp2_val=-(temp_val*vol8);
++   temp2_val=temp2_val>>13;
++   //temp2_val=-(temp_val);
++   //temp2_val=temp2_val>>3;
++   temp2_val=2048-temp2_val;
++ }
++ 
++//PORTD &= ~(1<<PD3);
++
++  mcpDacSend(temp2_val);  //9.6 us
++
++  //  mcpDacSend(500+((temp_val*vol8)>>3));
++  pointer = pointer + add_val;				// increment table pointer (ca. 3us)
++  timer++;
++
++
++   
++}
++
++
++SIGNAL (TIMER1_CAPT_vect)                          // PITCH read - interrupt service routine for Input Capture
++{
++pitch_counter = ICR1;
++
++//pitch_counter =OCR0A;                                // Read actual pitch counter value low byte
++//pitch_counter |= ((unsigned int)OCR0B << 8);         // Read actual counter value high byte
++
++pitch=(pitch_counter-pitch_counter_l);               // Counter change since last interrupt
++pitch_counter_l=pitch_counter;                       // Set actual value as new last value
++
++flag_pitch=1;                                        // Set new pitch value flag
++
++
++   
++};
++
++
++SIGNAL (INT0_vect) // VOLUME read - interrupt service routine for comparator interrupt 
++{	
++
++
++  
++vol_counter = TCNT1;
++
++vol=(vol_counter-vol_counter_l);                     // Counter change since last interrupt 
++vol_counter_l=vol_counter;                           // Set actual value as new last value
++
++flag_vol=1;                                          // Set new volume value flag
++
++};
++
++
++void ticktimer (int ticks)
++{
++  timer=0;while(timer<ticks);
++};
++
++  
++void setup() {                
++
++
++pinMode(3, OUTPUT);    
++digitalWrite(3, LOW);   // set the LED on
++
++
++  
++  
++// Timer 0, 15.625 kHz Interrupt
++
++TIMSK0 = 0; // Turn of Timer 0
++
++// Set Timer 2 for Wave generatuor
++TCCR2A =0; // Set to default
++TCCR2B = (1<<CS21); // Set clkI/8
++TIMSK2 = (1<<TOIE2); // Enable Timer/Counter0 Overflow Interrupt 
++
++// Timer 1, 16 bit timer used to measure pitch and volume frequency 
++
++TCCR1A = 0;
++TCCR1B = (1<<ICES1)|(1<<CS10);// |(1<<ICNC0);  Input Capture Positiv Edge Select, Noise Canceler off
++TIMSK1 = (1<<ICIE1); // Enable Timer 0 Input Capture Interrupt 
++
++PORTD = (1<<PD4); //Set Pull-Up on BUT
++
++EICRA = (1<<ISC00)|(1<<ISC01); // The rising edge of INT0 generates an interrupt request.
++EIMSK = (1<<INT0); // Enable External Interrupt
++
++
++
++
++sei (); // Enable Interrupts
++
++mcpDacInit(); // Initialize Digital Analog Converter (DAC)
++
++
++vol8=4095;
++
++	add_val = 500;					// Play welcome sounds
++	ticktimer(15000);
++	add_val = 1000;
++	ticktimer(15000);
++	add_val = 2000;
++	ticktimer(30000);
++
++   	pitch_init=pitch;				// Set initial pitch value
++   	vol_init=vol;					// Set initial volume value
++
++}
++
++void InitValues(void)
++
++{
++	vol8=4095;
++	add_val = 700;					// Play init sounds
++	ticktimer(15000);
++	vol8=0;
++	ticktimer(3000);
++	vol8=4095;
++	ticktimer(15000);
++	vol8=0;
++	ticktimer(3000);
++	vol8=4095;				
++	ticktimer(15000);
++	vol8=0;
++	ticktimer(3000);
++	add_val = 2000;
++	vol8=4095;
++	ticktimer(3000);
++
++   	pitch_init=pitch;				// Set initial pitch value
++   	vol_init=vol;					// Set initial volume value
++}
++
++
++void loop() {
++
++
++	
++
++mloop: 								// Main loop avoiding the GCC "optimization"	
++
++if ((state==0)&&((PIND&(1<<PD4))==0))
++	{state=1;
++	timer=0;}
++
++if ((state==1)&&((PIND&(1<<PD4))!=0))
++	{if (timer > 1500)
++	{InitValues();
++	state=0;
++	mode=4;} else {state=0;}};
++	
++
++if ((state==1)&&(timer>20000))
++	{
++	state=0;
++	mode++;
++
++	if (mode>4){mode=1;};
++	for (i=0;i<mode;i++)
++
++	{
++	vol8=4095;
++	add_val = 3000;	
++	ticktimer(1500);
++	vol8=0;
++	ticktimer(1500);
++	vol8=4095;
++	add_val = 0;	
++	};
++
++	
++
++	while((PIND&(1<<PD4))==0)
++	{};
++	};
++
++
++/* New VOLUME value */
++
++if (flag_vol){
++
++	vol_v=vol;							// Averaging volume values
++	vol_v=vol_l+((vol_v-vol_l)>>2);
++	vol_l=vol_v;
++
++	//if ((vol_v>15000)&(vol_v>17000)) {PORTA |= (1<<PA1);} else {PORTA &= ~(1<<PA1);} // LED on if value in range
++
++	//OCR1B=vol_v&0xff;							// Set volume CV value
++
++	//OCR1D=(vol_v>>2)&0xff;
++
++	switch (mode)
++
++	{
++		case 1:vol_v=4095;break;// Set pointer incerement 
++		case 2:add_val=33554432/vol_v;vol_v=4095;break;	// frequence to add_val
++		case 3:vol_v=4095;break;
++		case 4:vol_v=4095-(vol_init-vol_v);break;
++	};
++
++	/* Limit and set value*/
++
++	if (vol_v>4095) {vol8=4095;} else
++	if (vol_v<0) {vol8=0;} else {
++	vol8=vol_v;}
++
++
++	flag_vol=0;							// Clear volume flag
++
++}
++
++
++/* New PITCH value */
++
++if (flag_pitch){
++
++	//if ((pitch>19000)&(pitch<21000)) {PORTA |= (1<<PA0);} else {PORTA &= ~(1<<PA0);}	// LED on if value in range
++	//OCR1B=((pitch>>6)+200)&0xff;		// Set pitch CV Value
++
++
++	pitch_v=pitch;						// Averaging pitch values
++	pitch_v=pitch_l+((pitch_v-pitch_l)>>2);	
++	pitch_l=pitch_v;	
++
++
++	//OCR1D=0x80+(pitch_v>>4)%0x80;
++	//OCR1B=(pitch)&0xff;
++
++
++	switch (mode)
++	{
++		case 1:add_val=33554432/pitch_v;break; // frequence to add_val
++		case 2:break;
++		case 3:add_val=(pitch_init-pitch_v)/2+200;break;
++		case 4:add_val=(pitch_init-pitch_v)/2+200;break;
++	};
++
++	flag_pitch=0;						// Clear pitch flag
++}
++
++goto mloop; 							// End of main loop	
++
++}
++
++
++
++
++
+diff --git a/mcpDac.h b/mcpDac.h
+new file mode 100644
+index 0000000..f37a1e3
+--- /dev/null
++++ b/mcpDac.h
+@@ -0,0 +1,91 @@
++/* Arduino WaveHC Library
++ * Copyright (C) 2009 by William Greiman
++ *  
++ * This file is part of the Arduino WaveHC Library
++ *  
++ * This Library is free software: you can redistribute it and/or modify 
++ * it under the terms of the GNU General Public License as published by 
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ * 
++ * This Library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *  
++ * You should have received a copy of the GNU General Public License
++ * along with the Arduino WaveHC Library.  If not, see
++ * <http://www.gnu.org/licenses/>.
++ */
++/**
++ *  Macros and inline functions for MCP4921 DAC
++ */   
++#ifndef mcpDac_h
++#define mcpDac_h
++
++#include <avr/io.h>
++#include "OTPinDefs.h"
++
++
++//------------------------------------------------------------------------------
++#define mcpDacCsLow() MCP_DAC_CS_PORT &= ~_BV(MCP_DAC_CS_BIT)
++#define mcpDacCsHigh() MCP_DAC_CS_PORT |= _BV(MCP_DAC_CS_BIT)
++
++#define mcpDacSckLow() MCP_DAC_SCK_PORT &= ~_BV(MCP_DAC_SCK_BIT)
++#define mcpDacSckHigh() MCP_DAC_SCK_PORT |= _BV(MCP_DAC_SCK_BIT)
++#define mcpDacSckPulse() {mcpDacSckHigh();mcpDacSckLow();}
++
++#define mcpDacSdiLow() MCP_DAC_SDI_PORT &= ~_BV(MCP_DAC_SDI_BIT)
++#define mcpDacSdiHigh() MCP_DAC_SDI_PORT |= _BV(MCP_DAC_SDI_BIT)
++#define mcpDacSdiSet(v) if(v){mcpDacSdiHigh();}else{mcpDacSdiLow();}
++
++// send bit b of d
++#define mcpDacSendBit(d, b) {mcpDacSdiSet(d&_BV(b));mcpDacSckPulse();}
++
++//------------------------------------------------------------------------------
++// init dac I/O ports
++inline void mcpDacInit(void) {
++  // set all to output mode
++  MCP_DAC_CS_DDR |= _BV(MCP_DAC_CS_BIT);
++  MCP_DAC_SCK_DDR |= _BV(MCP_DAC_SCK_BIT);
++  MCP_DAC_SDI_DDR |= _BV(MCP_DAC_SDI_BIT);
++  // chip select high
++  mcpDacCsHigh();
++  
++#if USE_MCP_DAC_LDAC
++  // LDAC low always - use unbuffered mode
++  MCP_DAC_LDAC_DDR |= _BV(MCP_DAC_LDAC_BIT);
++  MCP_DAC_LDAC_PORT &= ~_BV(MCP_DAC_LDAC_BIT);
++#endif // USE_MCP_DAC_LDAC
++}
++//------------------------------------------------------------------------------
++// send 12 bits to dac
++// trusted compiler to optimize and it does 
++// csLow to csHigh takes 8 - 9 usec on a 16 MHz Arduino
++inline void mcpDacSend(uint16_t data) {
++  mcpDacCsLow();
++  // send DAC config bits
++  mcpDacSdiLow();
++  mcpDacSckPulse();  // DAC A
++  mcpDacSdiHigh();
++  mcpDacSckPulse();  // buffered REF
++
++  mcpDacSckPulse();  // 1X gain
++  mcpDacSckPulse();  // no SHDN
++  // send 12 data bits
++  mcpDacSendBit(data, 11);
++  mcpDacSendBit(data, 10);
++  mcpDacSendBit(data,  9);
++  mcpDacSendBit(data,  8);
++  mcpDacSendBit(data,  7);
++  mcpDacSendBit(data,  6);
++  mcpDacSendBit(data,  5);
++  mcpDacSendBit(data,  4);
++  mcpDacSendBit(data,  3);
++  mcpDacSendBit(data,  2);
++  mcpDacSendBit(data,  1);
++  mcpDacSendBit(data,  0);
++  mcpDacCsHigh();
++}
++
++#endif //mcpDac_h
+diff --git a/theremin_sintable.c b/theremin_sintable.c
+new file mode 100644
+index 0000000..4d6f16d
+--- /dev/null
++++ b/theremin_sintable.c
+@@ -0,0 +1,1031 @@
++/* 1024 entries full table, amplitude 1-255  Theremin-Table*/
++#include <avr/pgmspace.h>
++
++const int16_t sine_table[1024] PROGMEM = {\ 
++273,
++288,
++302,
++317,
++330,
++345,
++358,
++373,
++387,
++401,
++416,
++429,
++444,
++457,
++472,
++485,
++500,
++513,
++527,
++540,
++555,
++568,
++581,
++596,
++609,
++623,
++636,
++650,
++663,
++676,
++690,
++703,
++716,
++730,
++743,
++756,
++770,
++783,
++796,
++808,
++821,
++835,
++848,
++860,
++873,
++885,
++898,
++911,
++923,
++936,
++948,
++960,
++973,
++985,
++998,
++1010,
++1022,
++1033,
++1046,
++1058,
++1070,
++1081,
++1093,
++1105,
++1116,
++1128,
++1140,
++1151,
++1163,
++1174,
++1185,
++1197,
++1207,
++1219,
++1230,
++1241,
++1251,
++1263,
++1273,
++1284,
++1295,
++1305,
++1316,
++1326,
++1336,
++1347,
++1357,
++1368,
++1377,
++1387,
++1397,
++1407,
++1417,
++1427,
++1436,
++1446,
++1455,
++1465,
++1474,
++1483,
++1493,
++1502,
++1511,
++1520,
++1528,
++1537,
++1546,
++1555,
++1563,
++1572,
++1581,
++1589,
++1598,
++1606,
++1614,
++1623,
++1630,
++1639,
++1646,
++1654,
++1662,
++1669,
++1677,
++1684,
++1691,
++1700,
++1707,
++1714,
++1720,
++1727,
++1735,
++1742,
++1749,
++1755,
++1762,
++1768,
++1775,
++1781,
++1787,
++1794,
++1800,
++1806,
++1812,
++1818,
++1823,
++1829,
++1835,
++1841,
++1847,
++1851,
++1857,
++1863,
++1868,
++1873,
++1878,
++1883,
++1888,
++1893,
++1898,
++1902,
++1907,
++1911,
++1916,
++1921,
++1924,
++1929,
++1933,
++1937,
++1941,
++1945,
++1949,
++1953,
++1956,
++1959,
++1963,
++1966,
++1970,
++1973,
++1977,
++1980,
++1982,
++1986,
++1989,
++1992,
++1994,
++1997,
++2000,
++2002,
++2004,
++2007,
++2009,
++2011,
++2014,
++2016,
++2018,
++2020,
++2022,
++2023,
++2026,
++2027,
++2028,
++2031,
++2032,
++2033,
++2035,
++2036,
++2036,
++2038,
++2039,
++2039,
++2041,
++2041,
++2042,
++2043,
++2043,
++2045,
++2045,
++2045,
++2046,
++2045,
++2046,
++2046,
++2047,
++2046,
++2046,
++2046,
++2046,
++2046,
++2045,
++2045,
++2045,
++2044,
++2044,
++2043,
++2042,
++2041,
++2041,
++2040,
++2039,
++2038,
++2037,
++2035,
++2034,
++2033,
++2031,
++2030,
++2029,
++2028,
++2026,
++2024,
++2023,
++2021,
++2019,
++2018,
++2016,
++2014,
++2012,
++2010,
++2008,
++2006,
++2003,
++2001,
++1999,
++1996,
++1994,
++1991,
++1988,
++1986,
++1983,
++1980,
++1977,
++1975,
++1972,
++1969,
++1967,
++1963,
++1960,
++1957,
++1953,
++1951,
++1947,
++1944,
++1941,
++1937,
++1934,
++1930,
++1926,
++1923,
++1920,
++1915,
++1912,
++1908,
++1904,
++1900,
++1897,
++1893,
++1889,
++1885,
++1880,
++1876,
++1872,
++1867,
++1863,
++1859,
++1855,
++1850,
++1845,
++1841,
++1837,
++1832,
++1828,
++1823,
++1818,
++1813,
++1809,
++1803,
++1799,
++1793,
++1789,
++1784,
++1779,
++1773,
++1768,
++1763,
++1758,
++1753,
++1747,
++1742,
++1736,
++1731,
++1726,
++1721,
++1715,
++1710,
++1704,
++1698,
++1692,
++1687,
++1681,
++1675,
++1670,
++1664,
++1658,
++1652,
++1646,
++1640,
++1634,
++1628,
++1622,
++1616,
++1610,
++1604,
++1597,
++1591,
++1585,
++1579,
++1573,
++1566,
++1559,
++1553,
++1546,
++1540,
++1533,
++1527,
++1520,
++1514,
++1507,
++1500,
++1493,
++1486,
++1480,
++1473,
++1466,
++1460,
++1452,
++1445,
++1439,
++1431,
++1425,
++1417,
++1411,
++1403,
++1396,
++1389,
++1381,
++1375,
++1367,
++1360,
++1352,
++1345,
++1337,
++1330,
++1323,
++1315,
++1308,
++1301,
++1293,
++1285,
++1277,
++1269,
++1262,
++1254,
++1246,
++1239,
++1231,
++1223,
++1215,
++1207,
++1199,
++1191,
++1183,
++1176,
++1168,
++1159,
++1151,
++1143,
++1135,
++1127,
++1118,
++1111,
++1102,
++1094,
++1086,
++1077,
++1069,
++1061,
++1052,
++1044,
++1035,
++1027,
++1018,
++1010,
++1001,
++993,
++984,
++976,
++966,
++958,
++949,
++941,
++931,
++923,
++914,
++905,
++897,
++887,
++879,
++869,
++860,
++852,
++842,
++833,
++824,
++815,
++806,
++796,
++788,
++778,
++769,
++760,
++750,
++741,
++732,
++722,
++713,
++703,
++694,
++685,
++675,
++666,
++656,
++647,
++637,
++627,
++618,
++608,
++599,
++588,
++579,
++569,
++559,
++549,
++540,
++529,
++520,
++510,
++500,
++490,
++480,
++470,
++460,
++450,
++440,
++430,
++420,
++410,
++400,
++389,
++380,
++369,
++359,
++348,
++339,
++328,
++317,
++307,
++297,
++287,
++276,
++266,
++255,
++245,
++234,
++224,
++213,
++203,
++192,
++182,
++171,
++160,
++150,
++139,
++128,
++118,
++107,
++97,
++85,
++75,
++64,
++54,
++42,
++32,
++21,
++10,
++0,
++-11,
++-22,
++-33,
++-44,
++-55,
++-66,
++-77,
++-88,
++-99,
++-109,
++-121,
++-132,
++-143,
++-154,
++-165,
++-176,
++-187,
++-198,
++-209,
++-220,
++-231,
++-242,
++-253,
++-264,
++-275,
++-287,
++-298,
++-309,
++-320,
++-331,
++-343,
++-354,
++-365,
++-376,
++-387,
++-398,
++-410,
++-421,
++-432,
++-443,
++-455,
++-465,
++-477,
++-488,
++-499,
++-511,
++-521,
++-532,
++-544,
++-555,
++-567,
++-578,
++-588,
++-599,
++-611,
++-622,
++-633,
++-644,
++-656,
++-667,
++-678,
++-689,
++-700,
++-711

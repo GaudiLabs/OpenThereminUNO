@@ -144,7 +144,7 @@ TCCR1A = 0;
 TCCR1B = (1<<ICES1)|(1<<CS10);// |(1<<ICNC0);  Input Capture Positiv Edge Select, Noise Canceler off
 TIMSK1 = (1<<ICIE1); // Enable Timer 0 Input Capture Interrupt 
 
-PORTD = (1<<PD4); //Set Pull-Up on BUT
+PORTD = (1<<PORTD4); //Set Pull-Up on BUT
 
 EICRA = (1<<ISC00)|(1<<ISC01); // The rising edge of INT0 generates an interrupt request.
 EIMSK = (1<<INT0); // Enable External Interrupt
@@ -203,11 +203,11 @@ void loop() {
 
 mloop: 								// Main loop avoiding the GCC "optimization"	
 
-if ((state==0)&&((PIND&(1<<PD4))==0))
+if ((state==0)&&((PIND&(1<<PORTD4))==0))
 	{state=1;
 	timer=0;}
 
-if ((state==1)&&((PIND&(1<<PD4))!=0))
+if ((state==1)&&((PIND&(1<<PORTD4))!=0))
 	{if (timer > 1500)
 	{InitValues();
 	state=0;
@@ -234,7 +234,7 @@ if ((state==1)&&(timer>20000))
 
 	
 
-	while((PIND&(1<<PD4))==0)
+	while((PIND&(1<<PORTD4))==0)
 	{};
 	};
 

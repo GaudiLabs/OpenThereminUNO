@@ -1,7 +1,21 @@
-
-// OPEN.THEREMIN.UNO Code
-// V1.0
-// by Urs Gaudenz, 2012 
+/*
+ *  Open.Theremin.UNO control software for Arduino.UNO
+ *  Version 1.2
+ *  Copyright (C) 2010-2013 by Urs Gaudenz
+ *
+ *  Open.Theremin.UNO control software is free software: you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as published
+ *  by the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  Open.Theremin.UNO control software is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with
+ *  the Open.Theremin.UNO control software.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #include <avr/io.h>
 #include <inttypes.h>
@@ -15,295 +29,306 @@
 #include "theremin_sintable.c"
 
 #define F_CPU 16000000UL
+#define BAUD 9600
 
-int32_t pitch_init = 0; 			// Initial value of pitch
-int32_t vol_init = 0;				// Initial value of volume
-int32_t pitch_v,pitch_l;			// Last value of pitch
-int32_t vol_v,vol_l;				// Last value of volume
+#include <util/setbaud.h>
+
+/* General variables */
+int32_t pitch_init = 0; 			// Initialization value of pitch
+int32_t vol_init = 0;				// Initialization value of volume
+int32_t pitch_v,pitch_l;			// Last value of pitch (for filtering)
+int32_t vol_v,vol_l;				// Last value of volume (for filtering)
+uint16_t pitch = 0;				// Pitch value
+uint16_t pitch_counter = 0; 			// Pitch counter
+uint16_t pitch_counter_l = 0; 			// Last value of pitch counter
+uint16_t vol = 0;  				// Volume value
+uint16_t vol_counter_l = 0;			// Last value of volume counter
+
 uint8_t i;
-uint8_t state = 0;
-uint16_t val[8]; 
+uint8_t state = 0;				// State in the calibration state machine
+uint8_t mode = 4; 				// Calibration mode
 
-int16_t t;
-
-/* volatile  - used in the ISR Routine*/ 
-
-volatile uint16_t pitch = 0;			// Pitch value
-volatile uint16_t pitch_counter = 0; 	// Pitch counter
-volatile uint16_t pitch_counter_l = 0; 	// Last value of pitch counter
-volatile uint16_t vol = 0;  			// Volume value
-volatile uint16_t vol8;					// Volume byte
+/* volatile varables  - used in the ISR Routine*/ 
+volatile uint8_t vol8;				// Volume byte
+volatile bool flag_vol = 0;			// Volume read flag
 volatile uint16_t vol_counter = 0; 		// Volume counter
-volatile uint16_t vol_counter_l = 0; 	// Last value of volume counter
-
-volatile uint8_t flag_pwm = 0;			// PWM flag
-volatile uint8_t flag_vol = 0;			// Volume read flag
-volatile uint8_t flag_pitch = 0;		// Pitch read flag
 volatile uint16_t pointer = 0;			// Table pointer
 volatile uint16_t add_val = 0;			// Table pointer increment
-volatile uint8_t mode = 4; 			// Mode value
 volatile uint16_t timer = 0; 			// Timer value
 
-SIGNAL (TIMER2_OVF_vect)                          // Timer 2 -  WAVE generator 34us
+/* 16 bit by 8 bit multiplication */
+static inline uint32_t mul_16_8(uint16_t a, uint8_t b)	
 {
-  TCNT2 = 192;
-  
-  volatile  int32_t temp_val;
-  volatile  uint32_t temp2_val;
-  temp_val = (signed int)pgm_read_word_near (sine_table + ((unsigned int)(pointer>>6) & 0x3ff));  //3.2us
-  
-   // PORTD |= (1<<PD3);
+       uint32_t product;
+       asm (
+               "mul %A1, %2\n\t"
+               "movw %A0, r0\n\t"
+               "clr %C0\n\t"
+               "clr %D0\n\t"
+               "mul %B1, %2\n\t"
+               "add %B0, r0\n\t"
+               "adc %C0, r1\n\t"
+               "clr r1"
+               : "=&r" (product)
+               : "r" (a), "r" (b));
+       return product;
+}
+ 
+/* initialization routine for uart (serial) communication */
+void uart_init(void) {				
+    UBRR0H = UBRRH_VALUE;
+    UBRR0L = UBRRL_VALUE;
+
+#if USE_2X
+    UCSR0A |= _BV(U2X0);
+#else
+    UCSR0A &= ~(_BV(U2X0));
+#endif
+
+    UCSR0C = _BV(UCSZ01) | _BV(UCSZ00); 	// 8-bit data
+    UCSR0B = _BV(RXEN0) | _BV(TXEN0);   	// Enable RX and TX
+}
+
+/* Routine for sending character on uart */
+void uart_putchar(char c) {			
+    loop_until_bit_is_set(UCSR0A, UDRE0); 	// Wait until data register empty. 
+    UDR0 = c;
+}
+
+/* Externaly generated 31250 Hz Interrupt for WAVE generator (32us) */
+ISR (INT1_vect)                         
+{
+  					// Interrupt takes up a total of max 25 us
+EIMSK &= ~ (1<<INT1); 			// Disable External Interrupt INT1 to avoid recursive interrupts
+sei(); 					// Enable Interrupts to allow counter 1 interrupts
    
- if (temp_val>0){                   //13us
-   temp2_val=(temp_val*vol8);
-   temp2_val=temp2_val>>13; 
-  //  temp2_val=(temp_val);
-   //temp2_val=temp2_val>>3; 
-   temp2_val=temp2_val+2048;  
+    int16_t temp_val; 			// temporary variable 1
+    uint32_t temp2_val; 		// temporary variable 2
+
+  temp_val = (signed int)pgm_read_word_near (sine_table + ((unsigned int)(pointer>>6) & 0x3ff));  //Read next wave table value (3.0us)
+  
+//    PORTD |= (1<<PORTD5);
+ if (temp_val>0){                   	// multiply 16 bit wave number by 8 bit volume value (11.2us / 5.4us)
+   temp2_val=mul_16_8(temp_val,vol8);
+   temp2_val=temp2_val>>9; 
+   temp2_val=temp2_val+1748;  
  } else
  { 
-   temp2_val=-(temp_val*vol8);
-   temp2_val=temp2_val>>13;
-   //temp2_val=-(temp_val);
-   //temp2_val=temp2_val>>3;
-   temp2_val=2048-temp2_val;
+   temp2_val=mul_16_8(-temp_val,vol8);
+   temp2_val=temp2_val>>9; 
+   temp2_val=1748-temp2_val;
  }
- 
-//PORTD &= ~(1<<PD3);
 
-  mcpDacSend(temp2_val);  //9.6 us
+//  PORTD &= ~(1<<PORTD5);
+  mcpDacSend(temp2_val);  		//Send result to Digital to Analogue Converter (audio out) (9.6 us)
 
-  //  mcpDacSend(500+((temp_val*vol8)>>3));
-  pointer = pointer + add_val;				// increment table pointer (ca. 3us)
-  timer++;
+  pointer = pointer + add_val;		// increment table pointer (ca. 2us)
+  timer++;				// update 32us timer
 
-
+cli();  				// Turn of interrupts
+EIMSK |= (1<<INT1); 			// Re-Enable External Interrupt INT1
    
 }
 
-
-SIGNAL (TIMER1_CAPT_vect)                          // PITCH read - interrupt service routine for Input Capture
-{
-pitch_counter = ICR1;
-
-//pitch_counter =OCR0A;                                // Read actual pitch counter value low byte
-//pitch_counter |= ((unsigned int)OCR0B << 8);         // Read actual counter value high byte
-
-pitch=(pitch_counter-pitch_counter_l);               // Counter change since last interrupt
-pitch_counter_l=pitch_counter;                       // Set actual value as new last value
-
-flag_pitch=1;                                        // Set new pitch value flag
-
-
-   
-};
-
-
-SIGNAL (INT0_vect) // VOLUME read - interrupt service routine for comparator interrupt 
+/* VOLUME read - interrupt service routine for capturing volume counter value */
+ISR (INT0_vect) 			
 {	
-
-
-  
 vol_counter = TCNT1;
-
-vol=(vol_counter-vol_counter_l);                     // Counter change since last interrupt 
-vol_counter_l=vol_counter;                           // Set actual value as new last value
-
-flag_vol=1;                                          // Set new volume value flag
-
+flag_vol=true;                          // Set new volume value flag
 };
 
 
-void ticktimer (int ticks)
+void ticktimer (int ticks)        	//Wait for ticks * 32 us
 {
   timer=0;while(timer<ticks);
 };
 
-  
-void setup() {                
+/* Initialize pitch and volume values for calibration */
+void InitValues(void)			
+{
+// Set initial pitch value
+	pitch_counter_l=ICR1;                    	// Store actual Timer 1 counter value
+      	TIFR1 = (1<<ICF1);				// Clear capture flag
+      	timer=0;
+        while (!(TIFR1&(1<<ICF1))&&(timer<312));	// Waite for new value (with exit after 10 ms)
+	pitch_init=(ICR1-pitch_counter_l);              // Counter change since last interrupt = init pitch value
+				
+// Set initial volume value   
+	vol_counter_l=vol_counter;   			// Store actual counter value
+        flag_vol=false;					// Clear volume flag
+        timer=0;
+        while(!flag_vol&&(timer<312));			// Waite for new value (with exit after 10 ms)
+        vol_init=(vol_counter-vol_counter_l);           // Counter change since last interrupt = init volume value
+
+}
+
+/* General Setup Routine */
+void setup() {
+
+PORTD = (1<<PORTD4);            // Set Pull-Up on Button Pin D4 (BUT)
+DDRD |= (1<<PORTD5);            // Set LED Pin D5 as output
+
+/* Setup Timer 1, 16 bit timer used to measure pitch and volume frequency */
+
+TCCR1A = 0;                     // Set Timer 1 to Normal port operation (Arduino does activate something here ?)
+TCCR1B = (1<<ICES1)|(1<<CS10);  // Input Capture Positiv Edge Select, Run without prescaling (16 Mhz)
+
+/* Setup Inerrupts for Wave Generator and Volume read */
+EICRA = (1<<ISC00)|(1<<ISC01)|(1<<ISC11)|(1<<ISC10) ; // The rising edges of INT0 and INT1 generate an interrupt request.
+EIMSK = (1<<INT0)|(1<<INT1);    // Enable External Interrupt INT0 and INT1
+
+sei (); 			// Enable Interrupts
+
+mcpDacInit();			// Initialize Digital Analog Converter (DAC)
+
+/*
+// Init PWM Generator for CV out (if used)
+TCCR0A = (1<<COM0A1)|(1<<WGM01)|(1<<WGM00); //Set PWM on OC0A
+TCCR0B = (1<<CS00); // Set Clock with No prescaling on Timer 0
+TIMSK0=0; // No interrups
+DDRD |= (1<<PORTD6);       // Set Pin D6 as output
+*/
+
+// uart_init(); // Start Serial Communication (if used)
 
 
-pinMode(3, OUTPUT);    
-digitalWrite(3, LOW);   // set the LED on
+vol8=255;				// Set volume to max
 
-
-  
-  
-// Timer 0, 15.625 kHz Interrupt
-
-TIMSK0 = 0; // Turn of Timer 0
-
-// Set Timer 2 for Wave generatuor
-TCCR2A =0; // Set to default
-TCCR2B = (1<<CS21); // Set clkI/8
-TIMSK2 = (1<<TOIE2); // Enable Timer/Counter0 Overflow Interrupt 
-
-// Timer 1, 16 bit timer used to measure pitch and volume frequency 
-
-TCCR1A = 0;
-TCCR1B = (1<<ICES1)|(1<<CS10);// |(1<<ICNC0);  Input Capture Positiv Edge Select, Noise Canceler off
-TIMSK1 = (1<<ICIE1); // Enable Timer 0 Input Capture Interrupt 
-
-PORTD = (1<<PORTD4); //Set Pull-Up on BUT
-
-EICRA = (1<<ISC00)|(1<<ISC01); // The rising edge of INT0 generates an interrupt request.
-EIMSK = (1<<INT0); // Enable External Interrupt
-
-
-
-
-sei (); // Enable Interrupts
-
-mcpDacInit(); // Initialize Digital Analog Converter (DAC)
-
-
-vol8=4095;
-
-	add_val = 500;					// Play welcome sounds
+	add_val = 500;			// Play welcome sounds
 	ticktimer(15000);
 	add_val = 1000;
 	ticktimer(15000);
 	add_val = 2000;
 	ticktimer(30000);
 
-   	pitch_init=pitch;				// Set initial pitch value
-   	vol_init=vol;					// Set initial volume value
-
+        InitValues();    		// Capture initial calibration values
 }
 
-void InitValues(void)
 
-{
-	vol8=4095;
-	add_val = 700;					// Play init sounds
+
+/* Main Loop */
+void loop() {
+
+mloop: 							// Main loop avoiding the GCC "optimization"	
+
+if ((state==0)&&((PIND&(1<<PORTD4))==0))		// Check if key released
+	{state=1;
+	timer=0;}
+
+if ((state==1)&&((PIND&(1<<PORTD4))!=0))		// If key pressed
+	{if (timer > 1500)
+	{
+  	vol8=255;					// Play calibration sounds
+	add_val = 700;
 	ticktimer(15000);
 	vol8=0;
 	ticktimer(3000);
-	vol8=4095;
+	vol8=255;
 	ticktimer(15000);
 	vol8=0;
 	ticktimer(3000);
-	vol8=4095;				
+	vol8=255;				
 	ticktimer(15000);
 	vol8=0;
 	ticktimer(3000);
 	add_val = 2000;
-	vol8=4095;
+	vol8=255;
 	ticktimer(3000);
 
-   	pitch_init=pitch;				// Set initial pitch value
-   	vol_init=vol;					// Set initial volume value
-}
-
-
-void loop() {
-
-
-	
-
-mloop: 								// Main loop avoiding the GCC "optimization"	
-
-if ((state==0)&&((PIND&(1<<PORTD4))==0))
-	{state=1;
-	timer=0;}
-
-if ((state==1)&&((PIND&(1<<PORTD4))!=0))
-	{if (timer > 1500)
-	{InitValues();
+        InitValues();					// Capture calibration Values
 	state=0;
 	mode=4;} else {state=0;}};
 	
-
-if ((state==1)&&(timer>20000))
+if ((state==1)&&(timer>20000))				// If key pressed for >64 ms switch calibration modes
 	{
 	state=0;
 	mode++;
 
 	if (mode>4){mode=1;};
 	for (i=0;i<mode;i++)
-
 	{
-	vol8=4095;
+	vol8=255;
 	add_val = 3000;	
 	ticktimer(1500);
 	vol8=0;
 	ticktimer(1500);
-	vol8=4095;
+	vol8=255;
 	add_val = 0;	
 	};
-
-	
 
 	while((PIND&(1<<PORTD4))==0)
 	{};
 	};
 
+//OCR0A=pitch&0xff;					// Set CV value (if used)
+
+//if (timer>3125){
+// timer=0;
+//
+// uart_putchar(pitch&0xff);				// Send char on serial (if used)
+// uart_putchar((pitch>>8)&0xff);
+//
+//}
+
+
+/* New PITCH value */
+
+if (TIFR1&(1<<ICF1)){					// If capture event
+
+        pitch_counter=ICR1;				// Get Timer-Counter 1 value
+	pitch=(pitch_counter-pitch_counter_l);		// Counter change since last interrupt -> pitch value
+	pitch_counter_l=pitch_counter;			// Set actual value as new last value
+
+	//if ((pitch>19000)&(pitch<21000)) {PORTA |= (1<<PA0);} else {PORTA &= ~(1<<PA0);}	// LED on if value in range
+
+	pitch_v=pitch;					// Averaging pitch values
+	pitch_v=pitch_l+((pitch_v-pitch_l)>>2);	
+	pitch_l=pitch_v;	
+
+	switch (mode)					// set wave frequency for each mode
+	{
+		case 1:add_val=33554432/pitch_v;break; 		 // pitch calibration mode
+		case 2:break;					 // volume calibration mode
+		case 3:add_val=(pitch_init-pitch_v)/2+200;break; // mode without volume
+		case 4:add_val=(pitch_init-pitch_v)/2+200;break; // normal operation
+	};
+
+    TIFR1 = (1<<ICF1);                  		// Clear pitch capture flag
+}
 
 /* New VOLUME value */
 
 if (flag_vol){
 
-	vol_v=vol;							// Averaging volume values
+        vol=(vol_counter-vol_counter_l);		// Counter change since last interrupt 
+	vol_counter_l=vol_counter;			// Set actual value as new last value
+
+	vol_v=vol;					// Averaging volume values
 	vol_v=vol_l+((vol_v-vol_l)>>2);
 	vol_l=vol_v;
 
 	//if ((vol_v>15000)&(vol_v>17000)) {PORTA |= (1<<PA1);} else {PORTA &= ~(1<<PA1);} // LED on if value in range
 
-	//OCR1B=vol_v&0xff;							// Set volume CV value
-
-	//OCR1D=(vol_v>>2)&0xff;
-
-	switch (mode)
+	switch (mode)					// set volume for each mode
 
 	{
-		case 1:vol_v=4095;break;// Set pointer incerement 
-		case 2:add_val=33554432/vol_v;vol_v=4095;break;	// frequence to add_val
-		case 3:vol_v=4095;break;
-		case 4:vol_v=4095-(vol_init-vol_v);break;
+		case 1:vol_v=4095;break;			// pitch calibration mode 
+		case 2:add_val=33554432/vol_v;vol_v=4095;break;	// volume calibration mode
+		case 3:vol_v=4095;break;			// mode without volume
+		case 4:vol_v=4095-(vol_init-vol_v);break;	// normal operation
 	};
 
-	/* Limit and set value*/
+	
 
-	if (vol_v>4095) {vol8=4095;} else
+	if (vol_v>4095) {vol8=255;} else			// Limit and set volume value
 	if (vol_v<0) {vol8=0;} else {
-	vol8=vol_v;}
+	vol8=vol_v>>4;}
 
+	flag_vol=false;						// Clear volume flag
 
-	flag_vol=0;							// Clear volume flag
-
-}
-
-
-/* New PITCH value */
-
-if (flag_pitch){
-
-	//if ((pitch>19000)&(pitch<21000)) {PORTA |= (1<<PA0);} else {PORTA &= ~(1<<PA0);}	// LED on if value in range
-	//OCR1B=((pitch>>6)+200)&0xff;		// Set pitch CV Value
-
-
-	pitch_v=pitch;						// Averaging pitch values
-	pitch_v=pitch_l+((pitch_v-pitch_l)>>2);	
-	pitch_l=pitch_v;	
-
-
-	//OCR1D=0x80+(pitch_v>>4)%0x80;
-	//OCR1B=(pitch)&0xff;
-
-
-	switch (mode)
-	{
-		case 1:add_val=33554432/pitch_v;break; // frequence to add_val
-		case 2:break;
-		case 3:add_val=(pitch_init-pitch_v)/2+200;break;
-		case 4:add_val=(pitch_init-pitch_v)/2+200;break;
-	};
-
-	flag_pitch=0;						// Clear pitch flag
 }
 
 goto mloop; 							// End of main loop	
-
 }
 
 

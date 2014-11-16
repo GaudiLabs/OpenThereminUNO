@@ -1,6 +1,6 @@
 /*
  *  Open.Theremin.UNO control software for Arduino.UNO
- *  Version 1.2
+ *  Version 2.0
  *  Copyright (C) 2010-2013 by Urs Gaudenz
  *
  *  Open.Theremin.UNO control software is free software: you can redistribute it and/or
@@ -31,6 +31,9 @@
 #define LED_ON  (PORTD |= (1<<PORTD5))
 #define LED_OFF (PORTD &= ~(1<<PORTD5))
 
+#define INT0_STATE  (PIND&(1<<PORTD2))
+#define PC_STATE  (PINB&(1<<PORTB0))
+
 /* General variables */
 int32_t pitch_init       = 0;       // Initialization value of pitch
 int32_t vol_init         = 0;       // Initialization value of volume
@@ -48,11 +51,13 @@ uint8_t mode      = 4;              // Calibration mode
 
 /* volatile varables  - used in the ISR Routine*/
 volatile uint8_t vol8;               // Volume byte
-volatile bool flag_vol        = 0;   // Volume read flag
-volatile uint16_t vol_counter = 0;   // Volume counter
+volatile bool flag_vol,flag_pitch        = 0;   // Volume read flag
+volatile uint16_t vol_counter,vol_counter_i = 0;   // Volume counter
 volatile uint16_t pointer     = 0;   // Table pointer
 volatile uint16_t add_val     = 0;   // Table pointer increment
 volatile uint16_t timer       = 0;   // Timer value
+volatile uint8_t deb_p,deb_v       = 0;   // Counters vor debouncing
+
 
 /* General Setup Routine */
 void setup() {
@@ -64,6 +69,9 @@ void setup() {
   /* Setup Timer 1, 16 bit timer used to measure pitch and volume frequency */
   TCCR1A = 0;                     // Set Timer 1 to Normal port operation (Arduino does activate something here ?)
   TCCR1B = (1<<ICES1)|(1<<CS10);  // Input Capture Positive edge select, Run without prescaling (16 Mhz)
+
+TIMSK1 = (1<<ICIE1);            // Enable Input Capture Inrrupt
+
 
   /* Setup interrupts for Wave Generator and Volume read */
   EICRA = (1<<ISC00)|(1<<ISC01)|(1<<ISC11)|(1<<ISC10) ; // The rising edges of INT0 and INT1 generate an interrupt request.
@@ -172,11 +180,9 @@ mloop:                          // Main loop avoiding the GCC "optimization"
 
   /* New PITCH value */
 
-  if (TIFR1&(1<<ICF1)){                      // If capture event
+  if (flag_pitch){                      // If capture event
 
-    pitch_counter=ICR1;                      // Get Timer-Counter 1 value
-    pitch=(pitch_counter-pitch_counter_l);   // Counter change since last interrupt -> pitch value
-    pitch_counter_l=pitch_counter;           // Set actual value as new last value
+
 
     //if ((pitch>19000)&(pitch<21000)) {PORTA |= (1<<PA0);} else {PORTA &= ~(1<<PA0);}  // LED on if value in range
 
@@ -192,16 +198,16 @@ mloop:                          // Main loop avoiding the GCC "optimization"
       case 4: add_val=(pitch_init-pitch_v)/2+200; break; // normal operation
     };
 
-    TIFR1 = (1<<ICF1);                          // Clear pitch capture flag
+    flag_pitch=false;                         // Clear pitch capture flag
   }
 
   /* New VOLUME value */
 
   if (flag_vol){
 
-    vol=(vol_counter-vol_counter_l);        // Counter change since last interrupt 
-    vol_counter_l=vol_counter;          // Set actual value as new last value
 
+
+ if (vol<5000) vol=5000;
     vol_v=vol;                  // Averaging volume values
     vol_v=vol_l+((vol_v-vol_l)>>2);
     vol_l=vol_v;
@@ -226,8 +232,8 @@ mloop:                          // Main loop avoiding the GCC "optimization"
     else {
       vol8=vol_v>>4;
     }
-
     flag_vol=false;                     // Clear volume flag
+
   }
 
   goto mloop;                           // End of main loop 
@@ -284,6 +290,42 @@ ISR (INT1_vect)
   pointer = pointer + add_val;  // increment table pointer (ca. 2us)
   timer++;                      // update 32us timer
 
+
+
+if (PC_STATE) deb_p++;
+if (deb_p==3) {
+  cli();
+      pitch_counter=ICR1;                      // Get Timer-Counter 1 value
+
+        pitch=(pitch_counter-pitch_counter_l);   // Counter change since last interrupt -> pitch value
+    pitch_counter_l=pitch_counter;           // Set actual value as new last value
+    
+
+  };
+  
+  if (deb_p==5) {
+
+    flag_pitch=true;
+  };
+  
+
+    
+    
+if (INT0_STATE) deb_v++; 
+if (deb_v==3) {
+  cli();
+    vol_counter=vol_counter_i;                      // Get Timer-Counter 1 value
+            vol=(vol_counter-vol_counter_l);        // Counter change since last interrupt 
+    vol_counter_l=vol_counter;          // Set actual value as new last value
+
+};
+    
+if (deb_v==5) {
+
+    flag_vol=true;
+};
+    
+
   cli();                        // Turn of interrupts
   EIMSK |= (1<<INT1);           // Re-Enable External Interrupt INT1
 
@@ -292,9 +334,18 @@ ISR (INT1_vect)
 /* VOLUME read - interrupt service routine for capturing volume counter value */
 ISR (INT0_vect)             
 {   
-  vol_counter = TCNT1;
-  flag_vol=true;                // Set new volume value flag
+  vol_counter_i = TCNT1;
+  deb_v=0;
+
 };
+
+
+/* PITCH read - interrupt service routine for capturing pitch counter value */
+ISR (TIMER1_CAPT_vect) 
+{
+  deb_p=0;
+};
+
 
 
 void ticktimer (int ticks)      //Wait for ticks * 32 us
@@ -308,12 +359,12 @@ void ticktimer (int ticks)      //Wait for ticks * 32 us
 void InitValues(void)           
 {
   // Set initial pitch value
-  pitch_counter_l=ICR1;             // Store actual Timer 1 counter value
-  TIFR1 = (1<<ICF1);                // Clear capture flag
+  pitch_counter_l=pitch_counter;             // Store actual Timer 1 counter value
+  flag_pitch=false;                       // Clear volume flag
   timer=0;
-  while (!(TIFR1&(1<<ICF1))&&(timer<312))  // Waite for new value (with exit after 10 ms)
+  while(!flag_pitch && (timer < 312))     // Waite for new value (with exit after 10 ms)
     ;
-  pitch_init=(ICR1-pitch_counter_l);       // Counter change since last interrupt = init pitch value
+  pitch_init=pitch;       // Counter change since last interrupt = init pitch value
 
   // Set initial volume value   
   vol_counter_l=vol_counter;            // Store actual counter value
@@ -321,7 +372,7 @@ void InitValues(void)
   timer=0;
   while(!flag_vol && (timer < 312))     // Waite for new value (with exit after 10 ms)
     ;
-  vol_init=(vol_counter-vol_counter_l); // Counter change since last interrupt = init volume value
+  vol_init=vol; // Counter change since last interrupt = init volume value
 }
 
 

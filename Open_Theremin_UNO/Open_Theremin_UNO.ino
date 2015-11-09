@@ -240,7 +240,7 @@ mloop:                          // Main loop avoiding the GCC "optimization"
 }
 
 /* 16 bit by 8 bit multiplication */
-static inline uint32_t mul_16_8(uint16_t a, uint8_t b)  
+inline uint32_t mul_16_8(uint16_t a, uint8_t b)   //removed static for arduino 1.6.6.
 {
   uint32_t product;
   asm (
